@@ -215,17 +215,17 @@ cd D:\Project\FVM-Aerodynamic-Simulator
 # 配置项目（首次构建）
 cmake -B build -G "Visual Studio 17 2022" -A x64
 
-# 编译用于断点调试分析的 Debug 版本
-cmake --build build --config Debug -j
-
-# 编译用于 Nsight 分析的 Release 版本
-cmake --build build --config RelWithDebInfo -j
-
 # 编译 Release 版本
 cmake --build build --config Release -j
 
 # （可选）安装到 dist 目录
 cmake --install build --config Release
+
+# 编译用于断点调试分析的 Debug 版本
+cmake --build build --config Debug -j
+
+# 编译用于 Nsight 分析的 Release 版本
+cmake --build build --config RelWithDebInfo -j
 ```
 
 **配置输出说明**：
