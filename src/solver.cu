@@ -77,11 +77,9 @@ __device__ __forceinline__ float cross2d(float ax, float ay, float bx, float by)
 // 输出:限制后的斜率，确保单调性，避免数值振荡
 __device__ __forceinline__ float minmod(float a, float b)
 {
-    // 如果 a 和 b 符号相反(一个正一个负)，则返回0(不外推)
-    if (a * b <= 0.0f)
-        return 0.0f;
-    // 否则返回绝对值较小的那个(选择更保守的外推)
-    return (fabsf(a) < fabsf(b)) ? a : b;
+    // 使用无分支(Branchless)形式，依靠符号提取与内置最值函数消除Warp分化
+    // 异号时 copysignf 项相加为0；同号时提出符号，乘以最值
+    return 0.5f * (copysignf(1.0f, a) + copysignf(1.0f, b)) * fminf(fabsf(a), fabsf(b));
 }
 
 // 功能:Harten 熵修正，避免跨音速区域的数值不稳定(膨胀激波)
@@ -943,13 +941,9 @@ __device__ __forceinline__ void hllcFluxX(
     // 计算接触波速度 S*
     // S* = (pR - pL + rhoL*uL*(SL-uL) - rhoR*uR*(SR-uR)) / (rhoL*(SL-uL) - rhoR*(SR-uR))
     float denom_star = rhoL * (SL - uL) - rhoR * (SR - uR);
-    if (fabsf(denom_star) < 1e-10f)
-    {
-        // 如果分母接近零，说明左右状态几乎相同，退化到HLL方法
-        hllFluxX(rhoL, uL, vL, pL, EL, rhoR, uR, vR, pR, ER, f_rho, f_rho_u, f_rho_v, f_E);
-        return;
-    }
-    float S_star = (pR - pL + rhoL * uL * (SL - uL) - rhoR * uR * (SR - uR)) / denom_star;
+    // 强制规避除零问题，避免分支退化执行HLL
+    float safe_denom_star = copysignf(fmaxf(fabsf(denom_star), 1e-10f), denom_star);
+    float S_star = (pR - pL + rhoL * uL * (SL - uL) - rhoR * uR * (SR - uR)) / safe_denom_star;
 
     // HLLC 通量公式(四种情况，比HLL多考虑接触间断):
     if (SL >= 0.0f)
@@ -1139,13 +1133,9 @@ __device__ __forceinline__ void hllcFluxY(
 
     // 计算接触波速度(Y方向)，作为分母的物理量必须强制满足下限，防止除零
     float denom_star = rhoB * (SB - vB) - rhoT * (ST - vT);
-    if (fabsf(denom_star) < 1e-10f)
-    {
-        // 退化到HLL
-        hllFluxY(rhoB, uB, vB, pB, EB, rhoT, uT, vT, pT, ET, g_rho, g_rho_u, g_rho_v, g_E);
-        return;
-    }
-    float S_star = (pT - pB + rhoB * vB * (SB - vB) - rhoT * vT * (ST - vT)) / denom_star;
+    // 强制规避除零问题，避免分支退化执行HLL
+    float safe_denom_star = copysignf(fmaxf(fabsf(denom_star), 1e-10f), denom_star);
+    float S_star = (pT - pB + rhoB * vB * (SB - vB) - rhoT * vT * (ST - vT)) / safe_denom_star;
 
     // HLLC 通量公式(四种情况)
     if (SB >= 0.0f)
@@ -1285,49 +1275,32 @@ __global__ void computeFluxesKernel(
             float rhoL, uL, vL, pL, EL; // 界面左侧重构状态
             float rhoR, uR, vR, pR, ER; // 界面右侧重构状态
 
-            if (nearBoundary || lowDensity)
-            {
-                // ===== 一阶重构(分片常数) =====
-                // 直接使用网格中心的值，不外推
-                rhoL = fmaxf(rho[idx], MIN_DENSITY);
-                uL = u[idx];
-                vL = v[idx];
-                pL = fmaxf(p[idx], MIN_PRESSURE);
+            // 算术掩码：消灭重构阶数的 if/else 分支
+            float order_mask = (nearBoundary || lowDensity) ? 0.0f : 1.0f;
 
-                rhoR = fmaxf(rho[idx_ip1], MIN_DENSITY);
-                uR = u[idx_ip1];
-                vR = v[idx_ip1];
-                pR = fmaxf(p[idx_ip1], MIN_PRESSURE);
-            }
-            else
-            {
-                // ===== MUSCL二阶重构(分片线性) =====
-                // 对每个原始变量计算限制后的斜率
+            // 左侧状态重构(从 i 网格外推到 i+1/2 界面)
+            float slope_rho_L = musclSlope(rho[idx_im1], rho[idx], rho[idx_ip1]) * order_mask;
+            float slope_u_L = musclSlope(u[idx_im1], u[idx], u[idx_ip1]) * order_mask;
+            float slope_v_L = musclSlope(v[idx_im1], v[idx], v[idx_ip1]) * order_mask;
+            float slope_p_L = musclSlope(p[idx_im1], p[idx], p[idx_ip1]) * order_mask;
 
-                // 左侧状态重构(从 i 网格外推到 i+1/2 界面)
-                float slope_rho_L = musclSlope(rho[idx_im1], rho[idx], rho[idx_ip1]);
-                float slope_u_L = musclSlope(u[idx_im1], u[idx], u[idx_ip1]);
-                float slope_v_L = musclSlope(v[idx_im1], v[idx], v[idx_ip1]);
-                float slope_p_L = musclSlope(p[idx_im1], p[idx], p[idx_ip1]);
+            // 外推到界面: q_L(i+1/2) = q(i) + 0.5 * slope
+            rhoL = rho[idx] + 0.5f * slope_rho_L;
+            uL = u[idx] + 0.5f * slope_u_L;
+            vL = v[idx] + 0.5f * slope_v_L;
+            pL = p[idx] + 0.5f * slope_p_L;
 
-                // 外推到界面: q_L(i+1/2) = q(i) + 0.5 * slope
-                rhoL = rho[idx] + 0.5f * slope_rho_L;
-                uL = u[idx] + 0.5f * slope_u_L;
-                vL = v[idx] + 0.5f * slope_v_L;
-                pL = p[idx] + 0.5f * slope_p_L;
+            // 右侧状态重构(从 i+1 网格外推到 i+1/2 界面)
+            float slope_rho_R = musclSlope(rho[idx], rho[idx_ip1], rho[idx_ip2]) * order_mask;
+            float slope_u_R = musclSlope(u[idx], u[idx_ip1], u[idx_ip2]) * order_mask;
+            float slope_v_R = musclSlope(v[idx], v[idx_ip1], v[idx_ip2]) * order_mask;
+            float slope_p_R = musclSlope(p[idx], p[idx_ip1], p[idx_ip2]) * order_mask;
 
-                // 右侧状态重构(从 i+1 网格外推到 i+1/2 界面)
-                float slope_rho_R = musclSlope(rho[idx], rho[idx_ip1], rho[idx_ip2]);
-                float slope_u_R = musclSlope(u[idx], u[idx_ip1], u[idx_ip2]);
-                float slope_v_R = musclSlope(v[idx], v[idx_ip1], v[idx_ip2]);
-                float slope_p_R = musclSlope(p[idx], p[idx_ip1], p[idx_ip2]);
-
-                // 外推到界面: q_R(i+1/2) = q(i+1) - 0.5 * slope
-                rhoR = rho[idx_ip1] - 0.5f * slope_rho_R;
-                uR = u[idx_ip1] - 0.5f * slope_u_R;
-                vR = v[idx_ip1] - 0.5f * slope_v_R;
-                pR = p[idx_ip1] - 0.5f * slope_p_R;
-            }
+            // 外推到界面: q_R(i+1/2) = q(i+1) - 0.5 * slope
+            rhoR = rho[idx_ip1] - 0.5f * slope_rho_R;
+            uR = u[idx_ip1] - 0.5f * slope_u_R;
+            vR = v[idx_ip1] - 0.5f * slope_v_R;
+            pR = p[idx_ip1] - 0.5f * slope_p_R;
 
             // 确保重构后的状态仍然物理合理
             rhoL = fmaxf(rhoL, MIN_DENSITY);
@@ -1346,18 +1319,9 @@ __global__ void computeFluxesKernel(
 
             // 调用 Riemann 求解器计算数值通量
             float f_rho, f_rho_u, f_rho_v, f_E;
-            if (nearBoundary || lowDensity)
-            {
-                // 靠近边界或低密度区域使用更稳健的HLL求解器
-                hllFluxX(rhoL, uL, vL, pL, EL, rhoR, uR, vR, pR, ER,
-                         f_rho, f_rho_u, f_rho_v, f_E);
-            }
-            else
-            {
-                // 正常区域使用更精确的HLLC求解器
-                hllcFluxX(rhoL, uL, vL, pL, EL, rhoR, uR, vR, pR, ER,
-                          f_rho, f_rho_u, f_rho_v, f_E);
-            }
+            // 统一使用更精确的HLLC求解器
+            hllcFluxX(rhoL, uL, vL, pL, EL, rhoR, uR, vR, pR, ER,
+                      f_rho, f_rho_u, f_rho_v, f_E);
 
             // 存储守恒变量通量
             flux_rho_x[idx] = f_rho;
@@ -1402,42 +1366,28 @@ __global__ void computeFluxesKernel(
             float rhoB, uB, vB, pB, EB; // 界面下方(Bottom)状态
             float rhoT, uT, vT, pT, ET; // 界面上方(Top)状态
 
-            if (nearBoundary || lowDensity)
-            {
-                // 一阶重构
-                rhoB = fmaxf(rho[idx], MIN_DENSITY);
-                uB = u[idx];
-                vB = v[idx];
-                pB = fmaxf(p[idx], MIN_PRESSURE);
+            float order_mask = (nearBoundary || lowDensity) ? 0.0f : 1.0f;
 
-                rhoT = fmaxf(rho[idx_jp1], MIN_DENSITY);
-                uT = u[idx_jp1];
-                vT = v[idx_jp1];
-                pT = fmaxf(p[idx_jp1], MIN_PRESSURE);
-            }
-            else
-            {
-                // MUSCL二阶重构(Y方向)
-                float slope_rho_B = musclSlope(rho[idx_jm1], rho[idx], rho[idx_jp1]);
-                float slope_u_B = musclSlope(u[idx_jm1], u[idx], u[idx_jp1]);
-                float slope_v_B = musclSlope(v[idx_jm1], v[idx], v[idx_jp1]);
-                float slope_p_B = musclSlope(p[idx_jm1], p[idx], p[idx_jp1]);
+            // MUSCL二阶重构(Y方向)
+            float slope_rho_B = musclSlope(rho[idx_jm1], rho[idx], rho[idx_jp1]) * order_mask;
+            float slope_u_B = musclSlope(u[idx_jm1], u[idx], u[idx_jp1]) * order_mask;
+            float slope_v_B = musclSlope(v[idx_jm1], v[idx], v[idx_jp1]) * order_mask;
+            float slope_p_B = musclSlope(p[idx_jm1], p[idx], p[idx_jp1]) * order_mask;
 
-                rhoB = rho[idx] + 0.5f * slope_rho_B;
-                uB = u[idx] + 0.5f * slope_u_B;
-                vB = v[idx] + 0.5f * slope_v_B;
-                pB = p[idx] + 0.5f * slope_p_B;
+            rhoB = rho[idx] + 0.5f * slope_rho_B;
+            uB = u[idx] + 0.5f * slope_u_B;
+            vB = v[idx] + 0.5f * slope_v_B;
+            pB = p[idx] + 0.5f * slope_p_B;
 
-                float slope_rho_T = musclSlope(rho[idx], rho[idx_jp1], rho[idx_jp2]);
-                float slope_u_T = musclSlope(u[idx], u[idx_jp1], u[idx_jp2]);
-                float slope_v_T = musclSlope(v[idx], v[idx_jp1], v[idx_jp2]);
-                float slope_p_T = musclSlope(p[idx], p[idx_jp1], p[idx_jp2]);
+            float slope_rho_T = musclSlope(rho[idx], rho[idx_jp1], rho[idx_jp2]) * order_mask;
+            float slope_u_T = musclSlope(u[idx], u[idx_jp1], u[idx_jp2]) * order_mask;
+            float slope_v_T = musclSlope(v[idx], v[idx_jp1], v[idx_jp2]) * order_mask;
+            float slope_p_T = musclSlope(p[idx], p[idx_jp1], p[idx_jp2]) * order_mask;
 
-                rhoT = rho[idx_jp1] - 0.5f * slope_rho_T;
-                uT = u[idx_jp1] - 0.5f * slope_u_T;
-                vT = v[idx_jp1] - 0.5f * slope_v_T;
-                pT = p[idx_jp1] - 0.5f * slope_p_T;
-            }
+            rhoT = rho[idx_jp1] - 0.5f * slope_rho_T;
+            uT = u[idx_jp1] - 0.5f * slope_u_T;
+            vT = v[idx_jp1] - 0.5f * slope_v_T;
+            pT = p[idx_jp1] - 0.5f * slope_p_T;
 
             // 确保正定性
             rhoB = fmaxf(rhoB, MIN_DENSITY);
@@ -1454,16 +1404,8 @@ __global__ void computeFluxesKernel(
 
             // Riemann求解器(Y方向)
             float g_rho, g_rho_u, g_rho_v, g_E;
-            if (nearBoundary || lowDensity)
-            {
-                hllFluxY(rhoB, uB, vB, pB, EB, rhoT, uT, vT, pT, ET,
-                         g_rho, g_rho_u, g_rho_v, g_E);
-            }
-            else
-            {
-                hllcFluxY(rhoB, uB, vB, pB, EB, rhoT, uT, vT, pT, ET,
-                          g_rho, g_rho_u, g_rho_v, g_E);
-            }
+            hllcFluxY(rhoB, uB, vB, pB, EB, rhoT, uT, vT, pT, ET,
+                      g_rho, g_rho_u, g_rho_v, g_E);
 
             flux_rho_y[idx] = g_rho;
             flux_rho_u_y[idx] = g_rho_u;
