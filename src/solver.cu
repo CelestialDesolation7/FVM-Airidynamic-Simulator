@@ -1520,50 +1520,35 @@ __global__ void computeFluxesKernel(
             float rhoL, uL, vL, pL, EL; // 界面左侧重构状态
             float rhoR, uR, vR, pR, ER; // 界面右侧重构状态
 
-            if (nearBoundary || lowDensity)
-            {
-                // ===== 一阶重构(分片常数) =====
-                // 直接使用网格中心的值，不外推
-                // rho/p 由调用前置条件保证 ≥ MIN_DENSITY/MIN_PRESSURE，无需重复 clamp
-                rhoL = s_rho[sy][sx];
-                uL = s_u[sy][sx];
-                vL = s_v[sy][sx];
-                pL = s_p[sy][sx];
+            // 分支消除优化: 使用掩码代替if-else。若靠近边界或低密度区域则使用0阶(常数)，否则使用2阶MUSCL。
+            float order_mask = (nearBoundary || lowDensity) ? 0.0f : 1.0f;
 
-                rhoR = s_rho[sy][sx + 1];
-                uR = s_u[sy][sx + 1];
-                vR = s_v[sy][sx + 1];
-                pR = s_p[sy][sx + 1];
-            }
-            else
-            {
-                // ===== MUSCL二阶重构(分片线性) =====
-                // 对每个原始变量计算限制后的斜率
+            // ===== 统一重构计算 =====
+            // 对每个原始变量计算限制后的斜率
 
-                // 左侧状态重构(从 i 网格外推到 i+1/2 界面)
-                float slope_rho_L = musclSlope(s_rho[sy][sx - 1], s_rho[sy][sx], s_rho[sy][sx + 1]);
-                float slope_u_L = musclSlope(s_u[sy][sx - 1], s_u[sy][sx], s_u[sy][sx + 1]);
-                float slope_v_L = musclSlope(s_v[sy][sx - 1], s_v[sy][sx], s_v[sy][sx + 1]);
-                float slope_p_L = musclSlope(s_p[sy][sx - 1], s_p[sy][sx], s_p[sy][sx + 1]);
+            // 左侧状态重构(从 i 网格外推到 i+1/2 界面)
+            float slope_rho_L = musclSlope(s_rho[sy][sx - 1], s_rho[sy][sx], s_rho[sy][sx + 1]);
+            float slope_u_L = musclSlope(s_u[sy][sx - 1], s_u[sy][sx], s_u[sy][sx + 1]);
+            float slope_v_L = musclSlope(s_v[sy][sx - 1], s_v[sy][sx], s_v[sy][sx + 1]);
+            float slope_p_L = musclSlope(s_p[sy][sx - 1], s_p[sy][sx], s_p[sy][sx + 1]);
 
-                // 外推到界面: q_L(i+1/2) = q(i) + 0.5 * slope
-                rhoL = s_rho[sy][sx] + 0.5f * slope_rho_L;
-                uL = s_u[sy][sx] + 0.5f * slope_u_L;
-                vL = s_v[sy][sx] + 0.5f * slope_v_L;
-                pL = s_p[sy][sx] + 0.5f * slope_p_L;
+            // 外推到界面: q_L(i+1/2) = q(i) + 0.5 * slope * order_mask
+            rhoL = s_rho[sy][sx] + 0.5f * slope_rho_L * order_mask;
+            uL = s_u[sy][sx] + 0.5f * slope_u_L * order_mask;
+            vL = s_v[sy][sx] + 0.5f * slope_v_L * order_mask;
+            pL = s_p[sy][sx] + 0.5f * slope_p_L * order_mask;
 
-                // 右侧状态重构(从 i+1 网格外推到 i+1/2 界面)
-                float slope_rho_R = musclSlope(s_rho[sy][sx], s_rho[sy][sx + 1], s_rho[sy][sx + 2]);
-                float slope_u_R = musclSlope(s_u[sy][sx], s_u[sy][sx + 1], s_u[sy][sx + 2]);
-                float slope_v_R = musclSlope(s_v[sy][sx], s_v[sy][sx + 1], s_v[sy][sx + 2]);
-                float slope_p_R = musclSlope(s_p[sy][sx], s_p[sy][sx + 1], s_p[sy][sx + 2]);
+            // 右侧状态重构(从 i+1 网格外推到 i+1/2 界面)
+            float slope_rho_R = musclSlope(s_rho[sy][sx], s_rho[sy][sx + 1], s_rho[sy][sx + 2]);
+            float slope_u_R = musclSlope(s_u[sy][sx], s_u[sy][sx + 1], s_u[sy][sx + 2]);
+            float slope_v_R = musclSlope(s_v[sy][sx], s_v[sy][sx + 1], s_v[sy][sx + 2]);
+            float slope_p_R = musclSlope(s_p[sy][sx], s_p[sy][sx + 1], s_p[sy][sx + 2]);
 
-                // 外推到界面: q_R(i+1/2) = q(i+1) - 0.5 * slope
-                rhoR = s_rho[sy][sx + 1] - 0.5f * slope_rho_R;
-                uR = s_u[sy][sx + 1] - 0.5f * slope_u_R;
-                vR = s_v[sy][sx + 1] - 0.5f * slope_v_R;
-                pR = s_p[sy][sx + 1] - 0.5f * slope_p_R;
-            }
+            // 外推到界面: q_R(i+1/2) = q(i+1) - 0.5 * slope * order_mask
+            rhoR = s_rho[sy][sx + 1] - 0.5f * slope_rho_R * order_mask;
+            uR = s_u[sy][sx + 1] - 0.5f * slope_u_R * order_mask;
+            vR = s_v[sy][sx + 1] - 0.5f * slope_v_R * order_mask;
+            pR = s_p[sy][sx + 1] - 0.5f * slope_p_R * order_mask;
 
             // MUSCL 线性外推可能产生负密度/压强，此处是唯一需要 clamp 的位置
             // 一阶路径的输入已由前置条件保证，故 clamp 对其实际无效，但统一处理简化逻辑
@@ -1631,42 +1616,29 @@ __global__ void computeFluxesKernel(
             float rhoB, uB, vB, pB, EB; // 界面下方(Bottom)状态
             float rhoT, uT, vT, pT, ET; // 界面上方(Top)状态
 
-            if (nearBoundary || lowDensity)
-            {
-                // 一阶重构
-                rhoB = s_rho[sy][sx];
-                uB = s_u[sy][sx];
-                vB = s_v[sy][sx];
-                pB = s_p[sy][sx];
+            // 分支消除优化: 使用掩码替代Y方向的if-else重构阶数选择
+            float order_mask_y = (nearBoundary || lowDensity) ? 0.0f : 1.0f;
 
-                rhoT = s_rho[sy + 1][sx];
-                uT = s_u[sy + 1][sx];
-                vT = s_v[sy + 1][sx];
-                pT = s_p[sy + 1][sx];
-            }
-            else
-            {
-                // MUSCL二阶重构(Y方向)
-                float slope_rho_B = musclSlope(s_rho[sy - 1][sx], s_rho[sy][sx], s_rho[sy + 1][sx]);
-                float slope_u_B = musclSlope(s_u[sy - 1][sx], s_u[sy][sx], s_u[sy + 1][sx]);
-                float slope_v_B = musclSlope(s_v[sy - 1][sx], s_v[sy][sx], s_v[sy + 1][sx]);
-                float slope_p_B = musclSlope(s_p[sy - 1][sx], s_p[sy][sx], s_p[sy + 1][sx]);
+            // MUSCL二阶斜率计算(Y方向)
+            float slope_rho_B = musclSlope(s_rho[sy - 1][sx], s_rho[sy][sx], s_rho[sy + 1][sx]);
+            float slope_u_B = musclSlope(s_u[sy - 1][sx], s_u[sy][sx], s_u[sy + 1][sx]);
+            float slope_v_B = musclSlope(s_v[sy - 1][sx], s_v[sy][sx], s_v[sy + 1][sx]);
+            float slope_p_B = musclSlope(s_p[sy - 1][sx], s_p[sy][sx], s_p[sy + 1][sx]);
 
-                rhoB = s_rho[sy][sx] + 0.5f * slope_rho_B;
-                uB = s_u[sy][sx] + 0.5f * slope_u_B;
-                vB = s_v[sy][sx] + 0.5f * slope_v_B;
-                pB = s_p[sy][sx] + 0.5f * slope_p_B;
+            rhoB = s_rho[sy][sx] + 0.5f * slope_rho_B * order_mask_y;
+            uB = s_u[sy][sx] + 0.5f * slope_u_B * order_mask_y;
+            vB = s_v[sy][sx] + 0.5f * slope_v_B * order_mask_y;
+            pB = s_p[sy][sx] + 0.5f * slope_p_B * order_mask_y;
 
-                float slope_rho_T = musclSlope(s_rho[sy][sx], s_rho[sy + 1][sx], s_rho[sy + 2][sx]);
-                float slope_u_T = musclSlope(s_u[sy][sx], s_u[sy + 1][sx], s_u[sy + 2][sx]);
-                float slope_v_T = musclSlope(s_v[sy][sx], s_v[sy + 1][sx], s_v[sy + 2][sx]);
-                float slope_p_T = musclSlope(s_p[sy][sx], s_p[sy + 1][sx], s_p[sy + 2][sx]);
+            float slope_rho_T = musclSlope(s_rho[sy][sx], s_rho[sy + 1][sx], s_rho[sy + 2][sx]);
+            float slope_u_T = musclSlope(s_u[sy][sx], s_u[sy + 1][sx], s_u[sy + 2][sx]);
+            float slope_v_T = musclSlope(s_v[sy][sx], s_v[sy + 1][sx], s_v[sy + 2][sx]);
+            float slope_p_T = musclSlope(s_p[sy][sx], s_p[sy + 1][sx], s_p[sy + 2][sx]);
 
-                rhoT = s_rho[sy + 1][sx] - 0.5f * slope_rho_T;
-                uT = s_u[sy + 1][sx] - 0.5f * slope_u_T;
-                vT = s_v[sy + 1][sx] - 0.5f * slope_v_T;
-                pT = s_p[sy + 1][sx] - 0.5f * slope_p_T;
-            }
+            rhoT = s_rho[sy + 1][sx] - 0.5f * slope_rho_T * order_mask_y;
+            uT = s_u[sy + 1][sx] - 0.5f * slope_u_T * order_mask_y;
+            vT = s_v[sy + 1][sx] - 0.5f * slope_v_T * order_mask_y;
+            pT = s_p[sy + 1][sx] - 0.5f * slope_p_T * order_mask_y;
 
             // MUSCL 线性外推可能产生负密度/压强，此处是唯一需要 clamp 的位置
             rhoB = fmaxf(rhoB, MIN_DENSITY);
