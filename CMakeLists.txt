@@ -151,7 +151,7 @@ message(STATUS "✓ ImGui 源文件: ${IMGUI_DIR}")
 # 项目源文件（自动收集 src 目录下的 .cpp 和 .cu 文件）
 file(GLOB PROJECT_CPP_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
 file(GLOB PROJECT_CUDA_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cu)
-set(PROJECT_SOURCES ${PROJECT_CPP_SOURCES} ${PROJECT_CUDA_SOURCES})
+set(PROJECT_SOURCES ${PROJECT_CPP_SOURCES} ${PROJECT_CUDA_SOURCES} ${CMAKE_SOURCE_DIR}/external/mongoose/mongoose.c)
 
 list(LENGTH PROJECT_CPP_SOURCES CPP_COUNT)
 list(LENGTH PROJECT_CUDA_SOURCES CUDA_COUNT)
@@ -179,6 +179,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
     ${CUDAToolkit_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/external/mongoose
+    ${CMAKE_SOURCE_DIR}/external/stb
+    ${CMAKE_SOURCE_DIR}/external/nlohmann
 )
 
 message(STATUS "包含目录:")
@@ -197,6 +200,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
     # CUDA::cudart_static 会根据 CMAKE_CUDA_RUNTIME_LIBRARY 自动链接
 )
+
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 wsock32)
+endif()
 
 message(STATUS "链接库:")
 message(STATUS "  - OpenGL::GL")

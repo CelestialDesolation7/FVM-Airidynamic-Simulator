@@ -20,6 +20,9 @@
 #include "common.h"
 #include "solver.cuh"
 #include "renderer.h"
+#include "web_server.h"
+#include "json.hpp"
+using json = nlohmann::json;
 
 #ifdef _WIN32
 #define NOMINMAX  // 防止Windows.h定义min/max宏
@@ -1092,6 +1095,9 @@ int main(int argc, char *argv[])
     // 设置中文字体
     setupImGuiFont(io, DEFAULT_FONT_PATH, DEFAULT_FONT_SIZE);
 
+    // 启动 Web 云端视频流与事件交互核心
+    WebServer_Init(18080);
+
     // 初始化渲染器
     if (!renderer.initialize(windowWidth, windowHeight))
     {
@@ -1264,12 +1270,63 @@ int main(int argc, char *argv[])
         //   - solver CUDA直接写入PBO[writeIndex]（预映射），GL从纹理（来自另一个PBO）渲染
         //   - solver CUDA直接写入VBO[writeIndex]（预映射），GL从另一个VBO绘制矢量箭头
         //   完全零拷贝，无staging中转
-        renderer.render(params);
+        renderer.render(params); // 画流体背景网格数据（例如压力场/速度场）
 
-        ImGui::Render();
+        ImGui::Render();  // 让 ImGui 知道所有的界面和 UI 参数窗口都可以算出来了
+        // ImGui 在显卡里的绘制过程（也就是所有的字、边框等，全部会叠加上去）
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        glfwSwapBuffers(window);
+        // ==============================================
+        // 以下开始进入“云游戏同步（WebGL / C++ 后端通信）”的核心处理区间了
+        // 这里每秒钟跑 60 遍（因为处于 while (!glfwWindowShouldClose) 的主大循环心脏里）
+        // ==============================================
+        
+        // 我们给 Mongoose 这边下发一次轮询操作。如果你不用这种非阻塞机制（Non-blocking poll），你可能会需要独立把库起在另一个死循环线程里导致极其难以排错。
+        WebServer_PollEvents();
+        
+        // 这里就是循环解包所有的来自 WebSocket 的操作指令（鼠标和触控点）
+        while (true) {
+            std::string evt = WebServer_PopEvent();
+            if (evt.empty()) break; // 解析完目前积压的快递就自己停下跳出
+            try {
+                auto j = json::parse(evt);   // 解析 JSON 文本包裹，比如：{"type":"mousedown", "x":0.5, "y":0.5, "button":0}
+                std::string type = j["type"];
+                
+                // 计算当前【物理窗口尺寸】和【你网页上的图片比例】对应的映射转换
+                // 你在网页上点的 0.5 百分比的位置在屏幕上应该实实在在是多少的像素 x 和 y 应该算出来
+                int w, h;
+                glfwGetWindowSize(window, &w, &h);
+                float px = j.value("x", 0.0f);
+                float py = j.value("y", 0.0f);
+                int map_x = static_cast<int>(px * w);
+                int map_y = static_cast<int>(py * h);
+                
+                // --- 终极魔改魔法：获取主进程的界面事件 IO，去“无接触欺骗”（冒充本地鼠标操作） ---
+                ImGuiIO& cur_io = ImGui::GetIO();
+                cur_io.AddMousePosEvent(static_cast<float>(map_x), static_cast<float>(map_y));
+
+                // 如果判断对方鼠标在页面上点下去了，并且带着它的那个小指针，这里给模拟点击事件
+                if (type == "mousedown") {
+                    cur_io.AddMouseButtonEvent(j.value("button", 0), true);
+                } else if (type == "mouseup") {
+                    cur_io.AddMouseButtonEvent(j.value("button", 0), false);
+                } 
+            } catch (...) {}
+        }
+
+        // 推送目前已经汇聚好了界面元素和色彩给所有 Web 连接者（浏览器）
+        static int frameSkip = 0;
+        // 如果有人在看，我们就每隔 1 帧去调用。避免疯狂以每秒 60/144hz 提取（这对 CPU 和手机是个很大的负担！）
+        if (WebServer_HasClients() && (++frameSkip % 2 == 0)) { 
+            int cap_w, cap_h;
+            glfwGetFramebufferSize(window, &cap_w, &cap_h); // 拿出真实分辨率而不是可能被放大的逻辑窗口大小
+            // 获取截屏、在 OpenGL 用 glReadPixels() 吃下来并且变成 80 质量压缩率的数据图片！
+            std::vector<uint8_t> jpeg_data = WebServer_CaptureFrame(cap_w, cap_h);
+            // 把压缩包分发给刚才用 Mongoose 接进来 /ws 里的所有连接者
+            WebServer_BroadcastFrame(jpeg_data);
+        }
+
+        glfwSwapBuffers(window); // 显卡上的后缓冲区画图和前缓冲（你目前看得见的那一张）直接对调显示出来！
 
         // 计算帧率
         frameCount++;
@@ -1300,6 +1357,7 @@ int main(int argc, char *argv[])
 
     renderer.cleanup();
 
+    WebServer_Stop();
     glfwDestroyWindow(window);
     glfwTerminate();
 
