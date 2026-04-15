@@ -22,8 +22,13 @@
 #include "renderer.h"
 
 #ifdef _WIN32
-#define NOMINMAX  // 防止Windows.h定义min/max宏
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
+#endif
+
+#ifdef ENABLE_STREAMING
+#include "streaming/stream_server.h"
 #endif
 // clang-format on
 
@@ -79,6 +84,12 @@ float cachedMaxMach = 0.0f;
 // 垂直同步控制
 bool vsyncEnabled = true;
 
+#ifdef ENABLE_STREAMING
+// 串流服务器实例
+StreamServer g_streamServer;
+bool g_streamingEnabled = false;
+#endif
+
 // 求解器帧结果（求解器线程DONE前写入，渲染线程DONE后读取，通过条件变量同步保护）
 struct SolverFrameResults {
     float maxTemp = 0.0f;
@@ -131,6 +142,10 @@ void framebufferSizeCallback(GLFWwindow *window, int width, int height)
     windowWidth = width;
     windowHeight = height;
     renderer.resize(width, height);
+#ifdef ENABLE_STREAMING
+    if (g_streamingEnabled)
+        g_streamServer.requestResize(width, height);
+#endif
 }
 
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
@@ -1065,6 +1080,9 @@ int main(int argc, char *argv[])
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    // 使用真实帧缓冲像素尺寸初始化渲染/串流，避免高DPI下分辨率偏差。
+    glfwGetFramebufferSize(window, &windowWidth, &windowHeight);
     
     // 设置回调函数
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
@@ -1116,6 +1134,25 @@ int main(int argc, char *argv[])
     g_solverShouldStop = false;
     g_solverThread = std::thread(solverThreadFunc);
 
+#ifdef ENABLE_STREAMING
+    // 初始化串流服务器（可选功能，失败不影响主程序）
+    {
+        StreamServer::Config streamCfg;
+        streamCfg.httpPort = 8080;
+        streamCfg.wsPort = 8081;
+        streamCfg.bitrateMbps = 15;
+        streamCfg.fps = 60;
+        // web 目录路径：相对于可执行文件
+        streamCfg.webRoot = (std::filesystem::current_path() / "web").string();
+        if (g_streamServer.initialize(streamCfg, windowWidth, windowHeight)) {
+            g_streamingEnabled = true;
+            std::cout << "[串流] 浏览器串流已启动，访问 http://<本机IP>:8080\n";
+        } else {
+            std::cerr << "[串流] 串流初始化失败（主程序正常运行，串流功能不可用）\n";
+        }
+    }
+#endif
+
     // 初始化时间和帧率
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frameCount = 0;
@@ -1130,6 +1167,33 @@ int main(int argc, char *argv[])
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
+
+#ifdef ENABLE_STREAMING
+        if (g_streamingEnabled) {
+            g_streamServer.inputHandler().processEvents(window, windowWidth, windowHeight,
+                [window](int targetFbW, int targetFbH) {
+                    targetFbW = std::max(64, targetFbW & ~1);
+                    targetFbH = std::max(64, targetFbH & ~1);
+
+                    int currentFbW = 0, currentFbH = 0;
+                    glfwGetFramebufferSize(window, &currentFbW, &currentFbH);
+                    if (std::abs(currentFbW - targetFbW) <= 1 &&
+                        std::abs(currentFbH - targetFbH) <= 1)
+                    {
+                        return;
+                    }
+
+                    float scaleX = 1.0f, scaleY = 1.0f;
+                    glfwGetWindowContentScale(window, &scaleX, &scaleY);
+                    if (scaleX <= 0.0f) scaleX = 1.0f;
+                    if (scaleY <= 0.0f) scaleY = 1.0f;
+
+                    int winW = std::max(1, (int)std::lround(targetFbW / scaleX));
+                    int winH = std::max(1, (int)std::lround(targetFbH / scaleY));
+                    glfwSetWindowSize(window, winW, winH);
+                });
+        }
+#endif
 
         // ==================== 等待求解器完成 ====================
         bool hasNewResults = false;
@@ -1269,6 +1333,11 @@ int main(int argc, char *argv[])
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+#ifdef ENABLE_STREAMING
+        if (g_streamingEnabled)
+            g_streamServer.onFrameReady();
+#endif
+
         glfwSwapBuffers(window);
 
         // 计算帧率
@@ -1292,6 +1361,11 @@ int main(int argc, char *argv[])
     g_solverCV.notify_one();
     if (g_solverThread.joinable())
         g_solverThread.join();
+
+#ifdef ENABLE_STREAMING
+    if (g_streamingEnabled)
+        g_streamServer.shutdown();
+#endif
 
     // 例行清理代码
     ImGui_ImplOpenGL3_Shutdown();

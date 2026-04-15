@@ -125,6 +125,33 @@ else()
 endif()
 
 # =========================================================
+# 串流功能（可选）
+# =========================================================
+
+option(ENABLE_STREAMING "Enable LAN browser streaming via WebRTC + NVENC" ON)
+
+if(ENABLE_STREAMING)
+    message(STATUS "========================================")
+    message(STATUS "  串流功能: 已启用")
+    message(STATUS "========================================")
+
+    find_package(LibDataChannel CONFIG REQUIRED)
+    message(STATUS "✓ libdatachannel: found")
+
+    find_package(httplib CONFIG REQUIRED)
+    message(STATUS "✓ cpp-httplib: found")
+
+    find_path(FFNVCODEC_INCLUDE_DIRS "ffnvcodec/nvEncodeAPI.h")
+    if(FFNVCODEC_INCLUDE_DIRS)
+        message(STATUS "✓ ffnvcodec (NVENC headers): ${FFNVCODEC_INCLUDE_DIRS}")
+    else()
+        message(FATAL_ERROR "✗ ffnvcodec 未找到，请通过 vcpkg install ffnvcodec 安装")
+    endif()
+else()
+    message(STATUS "串流功能: 未启用 (使用 -DENABLE_STREAMING=ON 启用)")
+endif()
+
+# =========================================================
 # 配置源文件
 # =========================================================
 
@@ -152,6 +179,13 @@ message(STATUS "✓ ImGui 源文件: ${IMGUI_DIR}")
 file(GLOB PROJECT_CPP_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cpp)
 file(GLOB PROJECT_CUDA_SOURCES ${CMAKE_SOURCE_DIR}/src/*.cu)
 set(PROJECT_SOURCES ${PROJECT_CPP_SOURCES} ${PROJECT_CUDA_SOURCES})
+
+if(ENABLE_STREAMING)
+    file(GLOB STREAMING_SOURCES ${CMAKE_SOURCE_DIR}/src/streaming/*.cpp)
+    list(APPEND PROJECT_SOURCES ${STREAMING_SOURCES})
+    list(LENGTH STREAMING_SOURCES STREAM_COUNT)
+    message(STATUS "✓ 找到 ${STREAM_COUNT} 个串流模块源文件")
+endif()
 
 list(LENGTH PROJECT_CPP_SOURCES CPP_COUNT)
 list(LENGTH PROJECT_CUDA_SOURCES CUDA_COUNT)
@@ -181,6 +215,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 
+if(ENABLE_STREAMING)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/streaming
+        ${FFNVCODEC_INCLUDE_DIRS}
+    )
+endif()
+
 message(STATUS "包含目录:")
 message(STATUS "  - ${CMAKE_SOURCE_DIR}/src")
 message(STATUS "  - ${CMAKE_SOURCE_DIR}/src/include")
@@ -197,6 +238,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
     # CUDA::cudart_static 会根据 CMAKE_CUDA_RUNTIME_LIBRARY 自动链接
 )
+
+if(ENABLE_STREAMING)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_STREAMING)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        LibDataChannel::LibDataChannel
+        httplib::httplib
+        CUDA::cuda_driver
+    )
+    message(STATUS "✓ 串流依赖库: libdatachannel, cpp-httplib, CUDA Driver API")
+endif()
 
 message(STATUS "链接库:")
 message(STATUS "  - OpenGL::GL")
@@ -269,7 +320,7 @@ message(STATUS "  - C++: UTF-8 支持, 警告级别 3")
 # =========================================================
 
 add_executable(KernelBenchmark
-    ${CMAKE_SOURCE_DIR}/test/kernel_benchmark.cu
+    ${CMAKE_SOURCE_DIR}/src/test/kernel_benchmark.cu
     ${CMAKE_SOURCE_DIR}/src/solver.cu
 )
 
@@ -350,6 +401,20 @@ else()
     message(WARNING "⚠ assets 目录不存在: ${CMAKE_SOURCE_DIR}/assets")
 endif()
 
+# 1b. 串流功能：复制 web 客户端目录
+if(ENABLE_STREAMING)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/src/web)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo ">> 复制 web 目录..."
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/src/web
+                $<TARGET_FILE_DIR:${PROJECT_NAME}>/web
+            COMMENT "复制 Web 客户端文件到输出目录"
+        )
+        message(STATUS "✓ 将在构建后复制 web 目录")
+    endif()
+endif()
+
 # 2. Windows 平台：复制依赖 DLL
 if(WIN32)
     # 复制 vcpkg 管理的依赖库 DLL（GLFW, GLAD 等）
@@ -407,6 +472,15 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/assets)
         COMPONENT assets
     )
     message(STATUS "✓ 将安装 assets 资源文件")
+endif()
+
+# 4. 串流功能：安装 Web 客户端
+if(ENABLE_STREAMING AND EXISTS ${CMAKE_SOURCE_DIR}/src/web)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/web/
+        DESTINATION web
+        COMPONENT streaming
+    )
+    message(STATUS "✓ 将安装 web 客户端文件")
 endif()
 
 # =========================================================
