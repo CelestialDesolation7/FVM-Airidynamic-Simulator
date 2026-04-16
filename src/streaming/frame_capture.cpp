@@ -103,13 +103,15 @@ bool FrameCapture::resize(int width, int height) {
     return initialize(width, height);
 }
 
-void FrameCapture::capture() {
+void FrameCapture::capture(int srcW, int srcH) {
     // 第一步：将默认帧缓冲（前台渲染结果）Blit 到捕获专用 FBO。
-    // 目标坐标 (0, height_, width_, 0) 在 Y 轴方向翻转，补偿 OpenGL 纹理坐标从左下角起点的特性，
-    // 使最终传到浏览器的画面方向与屏幕显示一致（上下不颠倒）。
+    // 源矩形 (0, 0, srcW, srcH)：GLFW 窗口 FB 的实际尺寸
+    // 目标矩形 (0, height_, width_, 0)：FBO 尺寸（= 浏览器请求的物理像素分辨率）
+    //   Y 方向翻转补偿 OpenGL 纹理坐标从左下角起点的特性
+    // 当 srcW/srcH ≠ width_/height_ 时（如窗口被显示器截断），GL_LINEAR 自动完成缩放
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_[writeIndex_]);
-    glBlitFramebuffer(0, 0, width_, height_,
+    glBlitFramebuffer(0, 0, srcW, srcH,
                       0, height_, width_, 0,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);

@@ -22,7 +22,9 @@ public:
     bool resize(int width, int height);
 
     // 捕获一帧：Blit 默认帧缓冲 → FBO → CUDA 暂存缓冲（必须在持有 GL 上下文的线程调用）
-    void capture();
+    // srcW/srcH: 默认帧缓冲（GLFW 窗口 FB）的实际尺寸，可能与 FBO 尺寸不同
+    // 当 srcW/srcH ≠ width_/height_ 时，glBlitFramebuffer 执行 GL_LINEAR 缩放
+    void capture(int srcW, int srcH);
 
     // 返回上一帧的 CUDA 设备指针（线性 RGBA 布局，行步长为 width * 4 字节）。
     // 同时翻转双缓冲写索引：下一次 capture() 将写入另一个缓冲，

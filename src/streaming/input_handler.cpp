@@ -182,8 +182,10 @@ void InputHandler::onMessage(const std::string &json) {
                             jsonBool(json, "alt"),   jsonBool(json, "meta"));
     } else if (type == "resize") {
         ev.type = Event::RESIZE;
-        ev.x = jsonNum(json, "width");   // 实物理像素宽度（浏览器已乘以 DPR）
-        ev.y = jsonNum(json, "height");
+        ev.x = jsonNum(json, "width");   // CSS 逻辑像素宽度
+        ev.y = jsonNum(json, "height");  // CSS 逻辑像素高度
+        double dpr = jsonNum(json, "dpr");
+        ev.dpr = (dpr > 0.0) ? dpr : 1.0;  // 默认 DPR=1（兼容未发送 dpr 的旧客户端）
     } else {
         return; // 未知事件类型，丢弃
     }
@@ -208,7 +210,7 @@ bool InputHandler::hasPendingResize(int &outW, int &outH) {
 }
 
 void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
-                                 std::function<void(int, int)> onResize) {
+                                 std::function<void(int, int, double)> onResize) {
     // 快照模式：一次性将队列中的所有事件转移到局部快照
     // 优对：持锁时间极短（只做 swap），不会长时间阻塞网络线程的 onMessage 入队
     std::queue<Event> snapshot;
@@ -278,8 +280,8 @@ void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
             }
             break;
         case Event::RESIZE:
-            // 触发 StreamServer::requestResize()，将目标分辨率存入原子变量，由 applyPendingResize() 延迟执行
-            if (onResize) onResize((int)ev.x, (int)ev.y);
+            // 将 CSS 逻辑像素和 DPR 传给上层，由上层分别设置窗口大小和 FBO/编码器分辨率
+            if (onResize) onResize((int)ev.x, (int)ev.y, ev.dpr);
             break;
         }
     }

@@ -38,7 +38,9 @@ public:
     bool initialize(const Config &cfg, int captureW, int captureH);
     void shutdown();
 
-    void onFrameReady();
+    // 通知一帧渲染完成，触发捕获（在 GL 线程调用）
+    // fbW/fbH: GLFW 窗口帧缓冲的实际尺寸（可能小于 FBO 目标分辨率）
+    void onFrameReady(int fbW, int fbH);
 
     InputHandler &inputHandler() { return inputHandler_; }
 

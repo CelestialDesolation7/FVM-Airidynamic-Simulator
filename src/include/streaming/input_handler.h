@@ -15,10 +15,11 @@ public:
     struct Event {
         enum Type { MOUSE_MOVE, MOUSE_DOWN, MOUSE_UP, SCROLL, KEY_DOWN, KEY_UP, RESIZE };
         Type type;
-        double x = 0, y = 0;    // 鼠标事件：归一化坐标 [0,1]；RESIZE：像素尺寸；SCROLL：滚动增量
+        double x = 0, y = 0;    // 鼠标事件：归一化坐标 [0,1]；RESIZE：CSS 逻辑像素尺寸；SCROLL：滚动增量
         int button = 0;         // 鼠标按键编号（GLFW 常量，如 GLFW_MOUSE_BUTTON_LEFT）
         int key = 0;            // GLFW 键码（由 browserKeyToGlfw 从 KeyCode 字符串转换）
-        int mods = 0;           // GLFW 修饰键位掘码（Shift/Ctrl/Alt/Super）
+        int mods = 0;           // GLFW 修饰键位掩码（Shift/Ctrl/Alt/Super）
+        double dpr = 1.0;       // 仅 RESIZE：浏览器的 devicePixelRatio（用于计算 FBO 物理分辨率）
     };
 
     // 解析来自 DataChannel 的 JSON 消息，并将转换后的事件加入队列。
@@ -27,9 +28,11 @@ public:
 
     // 在主线程（GL 线程）上消费队列中的全部待处理事件。
     // window：GLFW 窗口句柄；winW/winH：当前窗口像素尺寸（用于坐标反归一化）。
-    // onResize：RESIZE 事件到来时的回调，用于通知上层更新捕获器/编础器分辨率。
+    // onResize(cssW, cssH, dpr)：RESIZE 事件到来时的回调，
+    // cssW/cssH 为浏览器 CSS 逻辑像素，dpr 为 devicePixelRatio。
+    // 上层用 CSS 像素调整窗口大小，用 CSS×DPR 设置 FBO/编码器分辨率。
     void processEvents(GLFWwindow *window, int winW, int winH,
-                       std::function<void(int, int)> onResize = nullptr);
+                       std::function<void(int, int, double)> onResize = nullptr);
 
     bool hasPendingResize(int &outW, int &outH);
 

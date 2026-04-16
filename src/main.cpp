@@ -142,10 +142,11 @@ void framebufferSizeCallback(GLFWwindow *window, int width, int height)
     windowWidth = width;
     windowHeight = height;
     renderer.resize(width, height);
-#ifdef ENABLE_STREAMING
-    if (g_streamingEnabled)
-        g_streamServer.requestResize(width, height);
-#endif
+    // 注意：串流模式下不从此回调触发 requestResize。
+    // 浏览器请求的物理分辨率（如 2880x1864）可能超过服务器显示器分辨率，
+    // 导致窗口被截断、FB 尺寸小于浏览器请求值。
+    // requestResize 由 processEvents 的 onResize 回调直接调用，
+    // 使用浏览器原始请求值，不受窗口截断影响。
 }
 
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
@@ -236,8 +237,26 @@ void solverThreadFunc()
             if (g_solverShouldStop) return;
         }
 
-        // ==================== 0. 障碍物几何更新（延迟到求解器线程执行，消除主线程CUDA同步开销） ====================
-        if (g_shapeResetRequested.exchange(false))
+        // ==================== 0. 延迟重置/几何更新（在step()之前执行，确保参数一致性） ====================
+        // g_resetRequested 必须在此处（solver线程）检查，而非仅在主线程安全区域检查。
+        // 否则：renderUI 修改 params（如 enable_viscosity=true）并设置 g_resetRequested=true，
+        // 但 solver 在下一帧主线程安全区域处理 reset 之前就用新 params 跑了一步 step()，
+        // 导致以错误的 dt 运行粘性求解器（Euler dt 远大于粘性 CFL），引发数值爆炸或 CUDA 崩溃。
+        if (g_resetRequested.exchange(false))
+        {
+            // 参数变化（粘性开关、来流参数等）：完整重置流场
+            params.t_current = 0.0f;
+            params.step = 0;
+            solver.reset(params);
+            g_dtNeedsRecompute = true;
+            float *ctPtr = renderer.getMappedCellTypePtr();
+            if (ctPtr)
+            {
+                solver.convertCellTypesToDevice(ctPtr);
+                g_solverResults.cellTypesDirty = true;
+            }
+        }
+        else if (g_shapeResetRequested.exchange(false))
         {
             // 形状/大小变化：完整重置流场
             solver.reset(params);
@@ -343,7 +362,7 @@ void solverThreadFunc()
         solver.queueTimeStepComputation(params);
 
         // ==================== 6. 同步所有GPU工作（step+viz+dt归约） ====================
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // 读取异步dt结果（锁页内存已就绪，零延迟）
         cachedDt = solver.readTimeStepResult(params);
@@ -1171,26 +1190,26 @@ int main(int argc, char *argv[])
 #ifdef ENABLE_STREAMING
         if (g_streamingEnabled) {
             g_streamServer.inputHandler().processEvents(window, windowWidth, windowHeight,
-                [window](int targetFbW, int targetFbH) {
-                    targetFbW = std::max(64, targetFbW & ~1);
-                    targetFbH = std::max(64, targetFbH & ~1);
+                [window](int cssW, int cssH, double dpr) {
+                    // cssW/cssH = 浏览器 CSS 逻辑像素；dpr = devicePixelRatio
+                    cssW = std::max(64, cssW & ~1);
+                    cssH = std::max(64, cssH & ~1);
 
-                    int currentFbW = 0, currentFbH = 0;
-                    glfwGetFramebufferSize(window, &currentFbW, &currentFbH);
-                    if (std::abs(currentFbW - targetFbW) <= 1 &&
-                        std::abs(currentFbH - targetFbH) <= 1)
-                    {
-                        return;
-                    }
+                    // 计算 FBO/编码器的目标分辨率：CSS × DPR
+                    // 在 macOS Retina (DPR=2) 下 = 虚拟渲染分辨率（如 3420×2146），
+                    // macOS 自身 UI 也以此方式渲染后降采样到面板，视觉质量等同于原生
+                    int fboW = std::max(64, (int)std::lround(cssW * dpr) & ~1);
+                    int fboH = std::max(64, (int)std::lround(cssH * dpr) & ~1);
+                    g_streamServer.requestResize(fboW, fboH);
 
-                    float scaleX = 1.0f, scaleY = 1.0f;
-                    glfwGetWindowContentScale(window, &scaleX, &scaleY);
-                    if (scaleX <= 0.0f) scaleX = 1.0f;
-                    if (scaleY <= 0.0f) scaleY = 1.0f;
-
-                    int winW = std::max(1, (int)std::lround(targetFbW / scaleX));
-                    int winH = std::max(1, (int)std::lround(targetFbH / scaleY));
-                    glfwSetWindowSize(window, winW, winH);
+                    // 窗口调整为 CSS 逻辑像素大小：
+                    //   - 任何服务器显示器均可容纳（如 1710×1112，远小于 4K/1080p 显示器）
+                    //   - ImGui 布局和交互均在此分辨率下正确工作
+                    //   - glBlitFramebuffer 从窗口 FB 缩放到 FBO 目标分辨率
+                    int currentWinW = 0, currentWinH = 0;
+                    glfwGetWindowSize(window, &currentWinW, &currentWinH);
+                    if (currentWinW != cssW || currentWinH != cssH)
+                        glfwSetWindowSize(window, cssW, cssH);
                 });
         }
 #endif
@@ -1335,7 +1354,7 @@ int main(int argc, char *argv[])
 
 #ifdef ENABLE_STREAMING
         if (g_streamingEnabled)
-            g_streamServer.onFrameReady();
+            g_streamServer.onFrameReady(windowWidth, windowHeight);
 #endif
 
         glfwSwapBuffers(window);

@@ -276,26 +276,29 @@ document.addEventListener("keyup", (e) => {
 });
 
 // ======================================================================
-// 分辨率同步（浏览器窗口尺寸 → 服务器捕获/编码分辨率）
+// 分辨率同步（浏览器窗口尺寸 → 服务器捕获/编码器分辨率）
 // ======================================================================
 
-// 发送当前浏览器窗口的物理像素尺寸给服务器
-// 目的：使服务器以与浏览器显示区域完全匹配的分辨率捕获和编码，避免缩放导致的模糊
+// 发送当前浏览器窗口的 CSS 逻辑像素尺寸和 DPR 给服务器
+// 服务器用 CSS 像素设置窗口大小（不超出服务器显示器），用 CSS×DPR 设置 FBO/编码器分辨率
+// macOS Retina 下 CSS×DPR = 虚拟渲染分辨率（如 3420×2224），macOS 自身 UI 也以此方式
+// 渲染后降采样到面板（如 2880×1864），因此流的视觉质量等同于原生 Retina
 function sendResize() {
-    const dpr = window.devicePixelRatio || 1;  // HiDPI 缩放因子（Retina 屏为 2.0）
+    const dpr  = window.devicePixelRatio || 1;
     const vp   = window.visualViewport;
-    const cssW = vp ? vp.width  : window.innerWidth;   // CSS 逻辑像素宽度
-    const cssH = vp ? vp.height : window.innerHeight;   // CSS 逻辑像素高度
+    const cssW = vp ? vp.width  : window.innerWidth;
+    const cssH = vp ? vp.height : window.innerHeight;
 
-    // 转换为物理像素，并对齐到偶数（H.264 YUV 4:2:0 要求宽高均为偶数）
-    const w = Math.max(64, (Math.round(cssW * dpr)) & ~1);
-    const h = Math.max(64, (Math.round(cssH * dpr)) & ~1);
+    // 发送 CSS 逻辑像素（对齐到偶数）和 DPR
+    // 服务器端按需乘以 DPR 计算 FBO 分辨率
+    const w = Math.max(64, (Math.round(cssW)) & ~1);
+    const h = Math.max(64, (Math.round(cssH)) & ~1);
 
-    // 去重：尺寸未变则跳过（避免不必要的服务器端 resize 重建 FBO/编码器）
+    // 去重：CSS 尺寸和 DPR 均未变则跳过
     if (w === lastResizeW && h === lastResizeH) return;
     lastResizeW = w;
     lastResizeH = h;
-    send({ type: "resize", width: w, height: h });
+    send({ type: "resize", width: w, height: h, dpr: dpr });
 }
 
 // 窗口尺寸变化时触发 resize 同步（防抖 300ms，避免拖动窗口时频繁触发）
@@ -303,6 +306,10 @@ window.addEventListener("resize", () => {
     clearTimeout(window._resizeDebounce);
     window._resizeDebounce = setTimeout(sendResize, 300);
 });
+
+// 视频开始播放时补发一次 resize（安全网：确保连接建立过程中的初始 resize 被正确处理）
+// 若 dc.onopen 的 sendResize 已成功处理，此处因去重逻辑会静默跳过
+video.addEventListener("playing", sendResize);
 
 // 页面加载完成后立即尝试建立连接
 connect();

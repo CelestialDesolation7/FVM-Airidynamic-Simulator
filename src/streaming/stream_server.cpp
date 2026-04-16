@@ -87,7 +87,7 @@ void StreamServer::shutdown() {
     std::cout << "[StreamServer] Shutdown complete\n";
 }
 
-void StreamServer::onFrameReady() {
+void StreamServer::onFrameReady(int fbW, int fbH) {
     // 快速路径检查：未运行或无客户端时不做任何操作，保证零开销
     // 此函数在 GL 线程主循环中每帧调用，必须迅速返回以不阻塞渲染
     if (!running_ || !hasClient_) return;
@@ -95,9 +95,10 @@ void StreamServer::onFrameReady() {
     // 尝试应用待调大小的分辨率变化（若编码线程正并发执行则延迟到下帧）
     applyPendingResize();
 
-    // 执行帧捕获：将当前帧缓冲内容 Blit 到 FBO，再通过 CUDA 拷贝到暂存缓冲
-    // 必须在 GL 线程调用（CUDA-GL 互操作和 glBlitFramebuffer 均需要 GL 上下文）
-    capture_.capture();
+    // 执行帧捕获：传入实际窗口 FB 尺寸作为 blit 源矩形
+    // 当 fbW/fbH ≠ FBO 尺寸时（如服务器显示器分辨率 < 浏览器请求分辨率），
+    // glBlitFramebuffer 自动以 GL_LINEAR 缩放
+    capture_.capture(fbW, fbH);
 
     // 向编码线程发出帧就绪信号
     // 编码线程在 encodeCV_.wait() 中阻塞等待，此后将被唤醒开始处理
