@@ -146,18 +146,20 @@ int InputHandler::parseMods(bool shift, bool ctrl, bool alt, bool meta) {
 }
 
 void InputHandler::onMessage(const std::string &json) {
+    // 此函数在 libdatachannel 的内部网络线程中被回调，与 GL 线程并发运行
+    // 内部不执行任何 OpenGL 调用，只做解析和入队
     std::string type = jsonStr(json, "type");
     Event ev{};
 
     if (type == "mousemove") {
         ev.type = Event::MOUSE_MOVE;
-        ev.x = jsonNum(json, "x");
+        ev.x = jsonNum(json, "x");  // 已经在浏览器端归一化为 [0,1]
         ev.y = jsonNum(json, "y");
     } else if (type == "mousedown") {
         ev.type = Event::MOUSE_DOWN;
         ev.x = jsonNum(json, "x");
         ev.y = jsonNum(json, "y");
-        ev.button = (int)jsonNum(json, "button");
+        ev.button = (int)jsonNum(json, "button");  // 浏览器按键编号: 0=左, 1=中, 2=右
     } else if (type == "mouseup") {
         ev.type = Event::MOUSE_UP;
         ev.x = jsonNum(json, "x");
@@ -165,29 +167,31 @@ void InputHandler::onMessage(const std::string &json) {
         ev.button = (int)jsonNum(json, "button");
     } else if (type == "wheel") {
         ev.type = Event::SCROLL;
-        ev.x = jsonNum(json, "dx");
-        ev.y = jsonNum(json, "dy");
+        ev.x = jsonNum(json, "dx");  // 水平滚动量（对应 WheelEvent.deltaX）
+        ev.y = jsonNum(json, "dy");  // 垂直滚动量（对应 WheelEvent.deltaY）
     } else if (type == "keydown") {
         ev.type = Event::KEY_DOWN;
-        ev.key = browserKeyToGlfw(jsonStr(json, "code"));
+        // 浏览器发送 KeyCode 字符串（如 "KeyA", "ArrowLeft"），转换为 GLFW 键码
+        ev.key  = browserKeyToGlfw(jsonStr(json, "code"));
         ev.mods = parseMods(jsonBool(json, "shift"), jsonBool(json, "ctrl"),
-                            jsonBool(json, "alt"), jsonBool(json, "meta"));
+                            jsonBool(json, "alt"),   jsonBool(json, "meta"));
     } else if (type == "keyup") {
         ev.type = Event::KEY_UP;
-        ev.key = browserKeyToGlfw(jsonStr(json, "code"));
+        ev.key  = browserKeyToGlfw(jsonStr(json, "code"));
         ev.mods = parseMods(jsonBool(json, "shift"), jsonBool(json, "ctrl"),
-                            jsonBool(json, "alt"), jsonBool(json, "meta"));
+                            jsonBool(json, "alt"),   jsonBool(json, "meta"));
     } else if (type == "resize") {
         ev.type = Event::RESIZE;
-        ev.x = jsonNum(json, "width");
+        ev.x = jsonNum(json, "width");   // 实物理像素宽度（浏览器已乘以 DPR）
         ev.y = jsonNum(json, "height");
     } else {
-        return; // unknown event type
+        return; // 未知事件类型，丢弃
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);  // 保护对队列的并发写入
     queue_.push(ev);
     if (ev.type == Event::RESIZE) {
+        // 额外记录最新的待处理 resize 尺寸，支持 hasPendingResize() 快速查询
         pendingResizeW_ = (int)ev.x;
         pendingResizeH_ = (int)ev.y;
         resizePending_ = true;
@@ -205,11 +209,14 @@ bool InputHandler::hasPendingResize(int &outW, int &outH) {
 
 void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
                                  std::function<void(int, int)> onResize) {
+    // 快照模式：一次性将队列中的所有事件转移到局部快照
+    // 优对：持锁时间极短（只做 swap），不会长时间阻塞网络线程的 onMessage 入队
     std::queue<Event> snapshot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::swap(snapshot, queue_);
+        std::swap(snapshot, queue_);  // O(1)，无拷贝
     }
+    // 此后无锁处理 snapshot，网络线程可并发入队新事件
 
     ImGuiIO &io = ImGui::GetIO();
 
@@ -219,6 +226,7 @@ void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
 
         switch (ev.type) {
         case Event::MOUSE_MOVE: {
+            // 将归一化坐标 [0,1] 反归一化为像素坐标，注入 ImGui 鼠标位置
             double px = ev.x * winW;
             double py = ev.y * winH;
             io.AddMousePosEvent((float)px, (float)py);
@@ -245,11 +253,17 @@ void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
             break;
         }
         case Event::SCROLL:
+            // 浏览器 WheelEvent.deltaY 向下为正，ImGui Y 轴向上为正，此处还除以 120（标准一格 = 120）
             io.AddMouseWheelEvent((float)ev.x, (float)(-ev.y / 120.0));
             break;
         case Event::KEY_DOWN:
             if (ev.key != GLFW_KEY_UNKNOWN) {
+                // 路径一：注入 ImGui 键盘事件（UI 控件响应）
                 io.AddKeyEvent(glfwKeyToImGuiKey(ev.key), true);
+                // 路径二：手动触发 GLFW 键盘回调（应用逻辑响应，如 ESC 退出、Space 暂停）
+                // 取出→装回→调用技巧：glfwSetKeyCallback 在设置新值时返回旧值。
+                // 用 nullptr 作为临时新值取出旧回调，立即装回，再手动调用。
+                // 这样既不需要全局存储回调指针，也不改变已注册的回调。
                 auto keyCb = glfwSetKeyCallback(window, nullptr);
                 glfwSetKeyCallback(window, keyCb);
                 if (keyCb) keyCb(window, ev.key, 0, GLFW_PRESS, ev.mods);
@@ -264,6 +278,7 @@ void InputHandler::processEvents(GLFWwindow *window, int winW, int winH,
             }
             break;
         case Event::RESIZE:
+            // 触发 StreamServer::requestResize()，将目标分辨率存入原子变量，由 applyPendingResize() 延迟执行
             if (onResize) onResize((int)ev.x, (int)ev.y);
             break;
         }

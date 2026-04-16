@@ -23,6 +23,8 @@
 FrameCapture::~FrameCapture() { cleanup(); }
 
 bool FrameCapture::createFBO(int idx, int w, int h) {
+    // --- 第一步：创建 RGBA8 纹理（FBO 的颜色附件）---
+    // GL_RGBA8 = 每通道 8 位无符号整数，总计 32 位/像素，与 NVENC 输入格式匹配
     glGenTextures(1, &texture_[idx]);
     glBindTexture(GL_TEXTURE_2D, texture_[idx]);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -30,6 +32,9 @@ bool FrameCapture::createFBO(int idx, int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, 0);
 
+    // --- 第二步：创建 FBO 并将纹理挂载为颜色附件 ---
+    // FBO（帧缓冲对象）是 OpenGL 的离屏渲染目标
+    // 将纹理挂载为 COLOR_ATTACHMENT0 后，glBlitFramebuffer 可将数据写入该纹理
     glGenFramebuffers(1, &fbo_[idx]);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_[idx]);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_[idx], 0);
@@ -40,22 +45,31 @@ bool FrameCapture::createFBO(int idx, int w, int h) {
         return false;
     }
 
+    // --- 第三步：向 CUDA 注册该 OpenGL 纹理（CUDA-GL 互操作）---
+    // ReadOnly 标志：CUDA 只读取该纹理，不会写入，允许 OpenGL 渲染时持有所有权
+    // 注册后可通过 cudaGraphicsMapResources 在 CUDA 代码中访问 OpenGL 显存
     CUDA_CHECK(cudaGraphicsGLRegisterImage(
         &cudaResource_[idx], texture_[idx], GL_TEXTURE_2D,
         cudaGraphicsRegisterFlagsReadOnly));
 
+    // --- 第四步：分配线性 CUDA 设备内存（暂存缓冲）---
+    // 这块内存是编码线程实际读取的数据来源
+    // 行步长（pitch_）= width * 4 字节（RGBA 每像素 4 字节，线性排列无填充）
+    // NVENC 要求输入为线性布局；CUDA 纹理数组为 swizzle 布局，因此需要这次额外拷贝
     CUDA_CHECK(cudaMalloc(&stagingBuffer_[idx], (size_t)w * h * 4));
 
     return true;
 }
 
 void FrameCapture::destroyFBO(int idx) {
+    // 注销顺序需与创建顺序相反，且必须在 CUDA-GL 互操作上下文仍然有效时调用
+    // 若先销毁 GL 上下文再调用此函数，cudaGraphicsUnregisterResource 会崩溃
     if (cudaResource_[idx]) {
-        cudaGraphicsUnregisterResource(cudaResource_[idx]);
+        cudaGraphicsUnregisterResource(cudaResource_[idx]);  // 解除 CUDA 对 GL 纹理的引用
         cudaResource_[idx] = nullptr;
     }
     if (stagingBuffer_[idx]) {
-        cudaFree(stagingBuffer_[idx]);
+        cudaFree(stagingBuffer_[idx]);  // 释放 CUDA 线性暂存缓冲
         stagingBuffer_[idx] = nullptr;
     }
     if (fbo_[idx]) { glDeleteFramebuffers(1, &fbo_[idx]); fbo_[idx] = 0; }
@@ -65,12 +79,16 @@ void FrameCapture::destroyFBO(int idx) {
 bool FrameCapture::initialize(int width, int height) {
     width_ = width;
     height_ = height;
-    pitch_ = width * 4;
+    pitch_ = width * 4;  // 每行字节数：RGBA 每像素 4 字节，无填充（tight packing）
 
+    // 创建两套独立的 FBO + 暂存缓冲，实现双缓冲流水线
+    // fbo_[0]/stagingBuffer_[0] 与 fbo_[1]/stagingBuffer_[1] 交替使用：
+    //   - GL 线程写 fbo_[writeIndex_] → stagingBuffer_[writeIndex_]
+    //   - 编码线程读 stagingBuffer_[1-writeIndex_]（上一帧）
     for (int i = 0; i < 2; ++i) {
         if (!createFBO(i, width, height)) return false;
     }
-    writeIndex_ = 0;
+    writeIndex_ = 0;  // 初始写入缓冲 0
     return true;
 }
 
@@ -116,7 +134,13 @@ void FrameCapture::capture() {
 }
 
 void *FrameCapture::getDevicePtr() {
+    // 取出当前写索引（指向刚被 capture() 写完的缓冲）作为读索引
     int readIdx = writeIndex_;
+    // 翻转写索引：下次 capture() 将写入另一个缓冲
+    // 在翻转瞬间，两个缓冲各司其职：
+    //   stagingBuffer_[readIdx]     ← 编码线程本次读取（本帧数据）
+    //   stagingBuffer_[1-readIdx]   ← GL 线程下次 capture() 写入（下帧数据）
+    // 由于两者访问不同的缓冲，无需加锁
     writeIndex_ = 1 - writeIndex_;
-    return stagingBuffer_[readIdx];
+    return stagingBuffer_[readIdx];  // 返回本帧数据的设备指针
 }

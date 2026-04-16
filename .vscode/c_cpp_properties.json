@@ -5,6 +5,7 @@
             "includePath": [
                 "${workspaceFolder}/src",
                 "${workspaceFolder}/src/include",
+                "${workspaceFolder}/src/include/streaming",
                 "${workspaceFolder}/external/imgui",
                 "${workspaceFolder}/external/imgui/backends",
                 "D:/vcpkg/installed/x64-windows/include",

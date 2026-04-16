@@ -218,6 +218,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 if(ENABLE_STREAMING)
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}/src/streaming
+        ${CMAKE_SOURCE_DIR}/src/include/streaming
         ${FFNVCODEC_INCLUDE_DIRS}
     )
 endif()

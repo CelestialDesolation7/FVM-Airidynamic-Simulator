@@ -36,11 +36,11 @@ public:
     // 冲刷编码器：排空编码器内部延迟队列，输出所有待输出帧（流结束时调用）
     bool flush(const OnEncodedCallback &cb);
 
-    // 强制下一帧编础 IDR 关键帧。
+    // 强制下一帧编码 IDR 关键帧。
     // 在新连接建立或浏览器发送 PLI（画面丢失指示）时调用，使对端可立即解码新帧。
     void forceKeyframe() { forceIdr_ = true; }
 
-    // 动态重配置编础器分辨率和码率。
+    // 动态重配置编码器分辨率和码率。
     // 若分辨率发生变化（NVENC 不支持热更改），返回 false，调用方需重新初始化。
     bool reconfigure(const Config &cfg);
 
@@ -54,7 +54,7 @@ private:
     Config config_{};
     bool forceIdr_ = true; // 首帧强制为 IDR，确保接收端开始解码时可立即渲染
 
-    // 已向 NVENC 注册的 CUDA 资源句柄（与暂存缓冲绑定，生命周期与编础器一致）
+    // 已向 NVENC 注册的 CUDA 资源句柄（与暂存缓冲绑定，生命周期与编码器一致）
     NV_ENC_REGISTERED_PTR registeredRes_ = nullptr;
 
     // NVENC 输出比特流缓冲区（由 SDK 内部管理，需通过 Lock/Unlock 才能访问数据）

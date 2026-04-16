@@ -58,7 +58,7 @@ private:
     CUcontext cuCtx_ = nullptr;
     std::mutex pipelineMutex_;
     std::mutex offerMutex_;   // 串行化 /api/offer 处理，确保同一时刻只有一条活跃连接
-    std::mutex sendMutex_;    // 保护 videoTrack_/rtpConfig_：编础线程读、信令线程写，二者需互斥
+    std::mutex sendMutex_;    // 保护 videoTrack_/rtpConfig_：编码线程读、信令线程写，二者需互斥
     std::atomic<int> pendingW_{0};
     std::atomic<int> pendingH_{0};
 
