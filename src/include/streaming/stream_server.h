@@ -78,6 +78,7 @@ private:
     std::mutex encodeMutex_;
     std::condition_variable encodeCV_;
     bool frameAvailable_ = false;
+    std::atomic<bool> frameInFlight_{false};  // 背压标志：capture→encode 期间为 true，防止覆写
 
     uint32_t rtpSsrc_ = 1;
     std::chrono::steady_clock::time_point streamStartTime_;

@@ -95,6 +95,11 @@ void StreamServer::onFrameReady(int fbW, int fbH) {
     // 尝试应用待调大小的分辨率变化（若编码线程正并发执行则延迟到下帧）
     applyPendingResize();
 
+    // 背压检查：如果编码线程尚未消费上一帧的捕获数据，跳过本帧捕获。
+    // 这保证 GL 线程不会覆写编码线程正在读取的暂存缓冲，消除数据竞争。
+    // NVENC 编码通常 < 1ms（1080p），因此绝大多数帧不会触发此跳过。
+    if (frameInFlight_.load(std::memory_order_acquire)) return;
+
     // 执行帧捕获：传入实际窗口 FB 尺寸作为 blit 源矩形
     // 当 fbW/fbH ≠ FBO 尺寸时（如服务器显示器分辨率 < 浏览器请求分辨率），
     // glBlitFramebuffer 自动以 GL_LINEAR 缩放
@@ -108,6 +113,8 @@ void StreamServer::onFrameReady(int fbW, int fbH) {
         frameAvailable_ = true;
     }
     encodeCV_.notify_one();
+    // 标记帧已提交：在编码线程完成处理前，GL 线程不再执行新的 capture()
+    frameInFlight_.store(true, std::memory_order_release);
 }
 
 void StreamServer::requestResize(int w, int h) {
@@ -174,48 +181,50 @@ void StreamServer::encodeLoop() {
             // 尝试非阻塞获取流水线锁：如果 GL 线程正在执行 applyPendingResize，则跳过本帧
             // 这确保捕获器和编码器的 resize 操作与编码读取操作互斥
             std::unique_lock<std::mutex> pipelineLock(pipelineMutex_, std::try_to_lock);
-            if (!pipelineLock.owns_lock()) continue;
+            if (pipelineLock.owns_lock()) {
+                // getDevicePtr(): 返回上一次 capture() 写入的暂存缓冲设备指针
+                // 索引翻转已在 capture() 内完成，此处仅做简单读取
+                void *devPtr = capture_.getDevicePtr();
+                if (devPtr) {
+                    encoder_.encodeFrame(devPtr, capture_.getPitch(),
+                        [this](const uint8_t *data, size_t size, bool /*isKey*/) {
+                        // 在 sendMutex_ 保护下将 videoTrack_/rtpConfig_/streamStartTime_
+                        // 复制到局部变量，防止信令线程在编码过程中替换指针导致的悬空引用。
+                        std::shared_ptr<rtc::Track> track;
+                        std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
+                        std::chrono::steady_clock::time_point startTime;
+                        {
+                            std::lock_guard<std::mutex> lk(sendMutex_);
+                            track = videoTrack_;
+                            rtp   = rtpConfig_;
+                            startTime = streamStartTime_;
+                        }
+                        if (!track || !track->isOpen() || !rtp) return;
 
-            // getDevicePtr(): 返回当前帧的设备指针，并翻转双缓冲写索引
-            void *devPtr = capture_.getDevicePtr();
-            if (!devPtr) continue;
+                        // 计算 RTP 时间戳：单位为 90000Hz H.264 时钟
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                            now - startTime).count();
+                        rtp->timestamp = rtp->startTimestamp +
+                            uint32_t(elapsed * 90000ULL / 1000000ULL);
 
-            encoder_.encodeFrame(devPtr, capture_.getPitch(),
-                [this](const uint8_t *data, size_t size, bool /*isKey*/) {
-                // 在 sendMutex_ 保护下将 videoTrack_/rtpConfig_ 复制到局部 shared_ptr，
-                // 防止信令线程在编码过程中替换全局指针导致的悬空引用。
-                // 局部 shared_ptr 通过引用计数延长生命周期，编础完成前不会析构。
-                std::shared_ptr<rtc::Track> track;
-                std::shared_ptr<rtc::RtpPacketizationConfig> rtp;
-                {
-                    std::lock_guard<std::mutex> lk(sendMutex_);
-                    track = videoTrack_;
-                    rtp   = rtpConfig_;
+                        try {
+                            track->send(
+                                reinterpret_cast<const std::byte *>(data), size);
+                            framesEncoded_.fetch_add(1, std::memory_order_relaxed);
+                            bytesSent_.fetch_add(size, std::memory_order_relaxed);
+                        } catch (const std::exception &e) {
+                            std::cerr << "[WebRTC] send error: " << e.what() << std::endl;
+                        }
+                    });
                 }
-                if (!track || !track->isOpen() || !rtp) return;
-
-                // 计算 RTP 时间戳：单位为 90000Hz H.264 时钟
-                // 公式：timestamp = startTimestamp + 秒数 * 90000
-                //          = startTimestamp + 微秒数 * 90000 / 1000000
-                // elapsed 是自本次会话建立（streamStartTime_ 设置时）起的经过时间
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                    now - streamStartTime_).count();
-                rtp->timestamp = rtp->startTimestamp +
-                    uint32_t(elapsed * 90000ULL / 1000000ULL);
-
-                try {
-                    // track->send 经过 H264RtpPacketizer 属责任链进行 RTP 打包分片，
-                    // 最终通过 DTLS 加密发往浏览器 UDP
-                    track->send(
-                        reinterpret_cast<const std::byte *>(data), size);
-                    framesEncoded_.fetch_add(1, std::memory_order_relaxed);
-                    bytesSent_.fetch_add(size, std::memory_order_relaxed);
-                } catch (const std::exception &e) {
-                    std::cerr << "[WebRTC] send error: " << e.what() << std::endl;
-                }
-            });
+            }
         }
+
+        // 释放背压：编码完成（或跳过），GL 线程可安全地向另一个缓冲执行下一帧捕获。
+        // cuMemcpy2D 从 capture staging buffer 到 encoder staging buffer 已完成，
+        // capture 的缓冲不再被读取。
+        frameInFlight_.store(false, std::memory_order_release);
     }
 }
 
@@ -435,7 +444,12 @@ void StreamServer::createPeerConnection(const std::string &offerSdp,
         std::cout << "[WebRTC] State: " << (idx < 6 ? names[idx] : "?") << "\n";
         if (state == rtc::PeerConnection::State::Connected) {
             hasClient_ = true;
-            streamStartTime_ = std::chrono::steady_clock::now();
+            {
+                // streamStartTime_ 在 encodeLoop 回调中被读取（编码线程），
+                // 此处在 libdatachannel 内部线程中写入，需 sendMutex_ 保护
+                std::lock_guard<std::mutex> lk(sendMutex_);
+                streamStartTime_ = std::chrono::steady_clock::now();
+            }
             encoder_.forceKeyframe();
         } else if (state == rtc::PeerConnection::State::Disconnected ||
                    state == rtc::PeerConnection::State::Failed ||

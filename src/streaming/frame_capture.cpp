@@ -104,13 +104,18 @@ bool FrameCapture::resize(int width, int height) {
 }
 
 void FrameCapture::capture(int srcW, int srcH) {
+    // 【关键】将 writeIndex_ 缓存到局部变量，防止编码线程在 capture() 执行过程中
+    // 通过 getDevicePtr() 修改 writeIndex_，导致 blit/map/copy/unmap 操作使用不同的缓冲索引，
+    // 造成数据错乱（闪回）或资源泄漏（map buffer[0] 却 unmap buffer[1]）
+    int idx = writeIndex_;
+
     // 第一步：将默认帧缓冲（前台渲染结果）Blit 到捕获专用 FBO。
     // 源矩形 (0, 0, srcW, srcH)：GLFW 窗口 FB 的实际尺寸
     // 目标矩形 (0, height_, width_, 0)：FBO 尺寸（= 浏览器请求的物理像素分辨率）
     //   Y 方向翻转补偿 OpenGL 纹理坐标从左下角起点的特性
     // 当 srcW/srcH ≠ width_/height_ 时（如窗口被显示器截断），GL_LINEAR 自动完成缩放
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_[writeIndex_]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_[idx]);
     glBlitFramebuffer(0, 0, srcW, srcH,
                       0, height_, width_, 0,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
@@ -119,30 +124,31 @@ void FrameCapture::capture(int srcW, int srcH) {
     // 第二步：映射 CUDA 资源，将 FBO 纹理数据拷贝到线性暂存缓冲，再解除映射。
     // 全部操作必须在持有 GL 上下文的 GL 线程上执行（CUDA-GL 互操作约束）。
     // 拷贝完成后编码线程即可安全读取暂存缓冲，无需等待 GL 上下文。
-    cudaError_t err = cudaGraphicsMapResources(1, &cudaResource_[writeIndex_], 0);
+    cudaError_t err = cudaGraphicsMapResources(1, &cudaResource_[idx], 0);
     if (err != cudaSuccess) return;
 
     cudaArray_t array = nullptr;
-    err = cudaGraphicsSubResourceGetMappedArray(&array, cudaResource_[writeIndex_], 0, 0);
+    err = cudaGraphicsSubResourceGetMappedArray(&array, cudaResource_[idx], 0, 0);
     if (err == cudaSuccess && array) {
         cudaMemcpy2DFromArray(
-            stagingBuffer_[writeIndex_], pitch_,
+            stagingBuffer_[idx], pitch_,
             array, 0, 0,
             pitch_, height_,
             cudaMemcpyDeviceToDevice);
     }
 
-    cudaGraphicsUnmapResources(1, &cudaResource_[writeIndex_], 0);
+    cudaGraphicsUnmapResources(1, &cudaResource_[idx], 0);
+
+    // 捕获完成：记录本次写入的缓冲索引，翻转 writeIndex_ 供下次 capture() 使用
+    // 翻转放在 GL 线程内（而非 getDevicePtr 的编码线程），消除跨线程数据竞争
+    lastCapturedIdx_ = idx;
+    writeIndex_ = 1 - idx;
 }
 
 void *FrameCapture::getDevicePtr() {
-    // 取出当前写索引（指向刚被 capture() 写完的缓冲）作为读索引
-    int readIdx = writeIndex_;
-    // 翻转写索引：下次 capture() 将写入另一个缓冲
-    // 在翻转瞬间，两个缓冲各司其职：
-    //   stagingBuffer_[readIdx]     ← 编码线程本次读取（本帧数据）
-    //   stagingBuffer_[1-readIdx]   ← GL 线程下次 capture() 写入（下帧数据）
-    // 由于两者访问不同的缓冲，无需加锁
-    writeIndex_ = 1 - writeIndex_;
-    return stagingBuffer_[readIdx];  // 返回本帧数据的设备指针
+    // 返回最近一次 capture() 写入的暂存缓冲设备指针
+    // 索引翻转已在 capture() 内完成，此函数仅做简单读取
+    // 线程安全保证：调用方（encodeLoop）通过 encodeMutex_ 与 GL 线程的 onFrameReady()
+    // 建立 happens-before 关系，确保看到 capture() 写入的最新 lastCapturedIdx_
+    return stagingBuffer_[lastCapturedIdx_];
 }

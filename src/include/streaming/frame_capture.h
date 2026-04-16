@@ -41,6 +41,7 @@ private:
     size_t pitch_ = 0;
 
     int writeIndex_ = 0;
+    int lastCapturedIdx_ = 0;  // capture() 最近写入的缓冲索引（供 getDevicePtr 读取）
     GLuint fbo_[2] = {};
     GLuint texture_[2] = {};
     cudaGraphicsResource *cudaResource_[2] = {};
