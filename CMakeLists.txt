@@ -9,7 +9,7 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "Verbose build output")
 set(CMAKE_MESSAGE_LOG_LEVEL STATUS)
 
 message(STATUS "========================================")
-message(STATUS "  FVM Aerodynamic Simulator 构建配置")
+message(STATUS "  FVM Airidynamic Simulator 构建配置")
 message(STATUS "========================================")
 message(STATUS "CMake 版本: ${CMAKE_VERSION}")
 message(STATUS "系统: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_VERSION}")
@@ -47,9 +47,9 @@ endif()
 # 项目声明
 # =========================================================
 
-project(FVM-Aerodynamic-Simulator 
+project(FVM-Airidynamic-Simulator 
     VERSION 1.0.0
-    DESCRIPTION "Real-time GPU-accelerated aerodynamic simulator using FVM"
+    DESCRIPTION "Real-time GPU-accelerated airidynamic simulator using FVM"
     LANGUAGES CXX CUDA
 )
 

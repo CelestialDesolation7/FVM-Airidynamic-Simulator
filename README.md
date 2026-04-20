@@ -1,4 +1,4 @@
-# FVM-Aerodynamic-Simulator
+# FVM-Airidynamic-Simulator
 
 ## 项目概述
 
@@ -158,8 +158,8 @@ cmake -B build -DCMAKE_TOOLCHAIN_FILE="你的路径/vcpkg/scripts/buildsystems/v
 ### 步骤 3：克隆项目
 
 ```powershell
-git clone <your-repo-url> D:\Project\FVM-Aerodynamic-Simulator
-cd D:\Project\FVM-Aerodynamic-Simulator
+git clone <your-repo-url> D:\Project\FVM-Airidynamic-Simulator
+cd D:\Project\FVM-Airidynamic-Simulator
 ```
 
 ### 步骤 4：配置和构建
@@ -216,13 +216,13 @@ cmake --build build --config RelWithDebInfo -j
 cd build\Release
 
 # 运行程序
-.\FVM-Aerodynamic-Simulator.exe
+.\FVM-Airidynamic-Simulator.exe
 ```
 
 或者运行安装后的版本：
 ```powershell
 cd dist
-.\FVM-Aerodynamic-Simulator.exe
+.\FVM-Airidynamic-Simulator.exe
 ```
 
 ### 核函数性能分析（Nsight Compute）
@@ -411,7 +411,7 @@ $$
 ## 项目结构
 
 ```
-FVM-Aerodynamic-Simulator/
+FVM-Airidynamic-Simulator/
 ├── img/                      # 图片文件
 ├── assets/                      # 资源文件
 │   ├── fonts/                   # 字体文件
